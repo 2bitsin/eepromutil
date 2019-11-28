@@ -19,9 +19,9 @@
  * 
  * 
  */
-typedef uint8_t byte;
-typedef uint16_t word;
-typedef uint32_t dword;
+
+#include "protocol.hpp"
+#include "crc32.hpp"
 
 #define DDR_ADDR_L   DDRA
 #define DDR_ADDR_M   DDRC
@@ -53,14 +53,9 @@ typedef uint32_t dword;
 
 #define WAIT_SINGLE() asm volatile ("nop")
 
-//////////////////////////////////
-
-static const constexpr dword BUFFER_SIZE    = 4096u;
-static const constexpr dword SYNC_MAGIC     = 0x434E5953ull;
-static const constexpr dword SACK_MAGIC     = 0x4B434153ull;
-
-static const constexpr dword CMD_SOFT_INFO  = 0x44494653ull;
-static const constexpr dword CMD_ERASE_CHIP = 0x48435245ull;
+#define WAIT_TCE() delay(100)
+#define WAIT_TSE() delay(25)
+#define WAIT_BYP() delayMicroseconds(40)
 
 //////////////////////////////////
 
@@ -95,6 +90,7 @@ void out_data(byte data)
 {
   DDR_DATA_L = 0xFFu;
   WAIT_SINGLE();
+  WAIT_SINGLE();
   PORT_DATA_L = data;
 }
 
@@ -102,6 +98,7 @@ byte inp_data()
 {
   DDR_DATA_L = 0x00u;
   PORT_DATA_L = 0x00u;
+  WAIT_SINGLE();
   WAIT_SINGLE();
   return PINP_DATA_L;
 }
@@ -122,44 +119,103 @@ void write_cycle(dword addr, byte data)
 {
   set_oe(0);
   set_we(0);
+
   WAIT_SINGLE();
+  
   set_addr(addr);
-  out_data(data);
   set_we(1);
+
+  WAIT_SINGLE();
+  
+  out_data(data);
+  set_we(0);
+  
   WAIT_SINGLE();
 }
 
 uint8_t read_cycle(dword addr)
-{
+{  
   set_oe(0);
   set_we(0);
+  WAIT_SINGLE();
   set_addr(addr);
   set_oe(1);
   WAIT_SINGLE();
+  set_oe(0);
   return inp_data();
 }
 
-void poll_dq7(byte last_write)
-{
-  while ((inp_data()^last_write)&0x80u);  
-}
-
-word read_soft_id()
+void enter_softid_mode()
 {
   write_cycle(0x5555u, 0xAAu);
   write_cycle(0x2AAAu, 0x55u);
   write_cycle(0x5555u, 0x90u);
-  poll_dq7(0x90u);
-  
+  delay(1);
+}
+
+void exit_softid_mode()
+{
+  write_cycle(0x5555u, 0xAAu);
+  write_cycle(0x2AAAu, 0x55u);
+  write_cycle(0x5555u, 0xf0u);
+  delay(1);
+}
+
+word read_soft_id()
+{
+  enter_softid_mode();
   word a = read_cycle(0x0000u);  
   word b = read_cycle(0x0001u);  
+  exit_softid_mode();
+  return a*0x100u + b;
+}
 
+void chip_erase()
+{
+  write_cycle(0x5555u, 0xAAu);
+  write_cycle(0x2AAAu, 0x55u);
+  write_cycle(0x5555u, 0x80u);
   write_cycle(0x5555u, 0xAAu);
   write_cycle(0x2AAAu, 0x55u);
   write_cycle(0x5555u, 0x10u);
-  poll_dq7(0x10u);  
+  WAIT_TCE();
+  exit_softid_mode();
+}
 
-  return a*0x100u + b;
+void sector_erase(dword seca)
+{
+  seca <<= 12;
+  write_cycle(0x5555u, 0xAAu);
+  write_cycle(0x2AAAu, 0x55u);
+  write_cycle(0x5555u, 0x80u);
+  write_cycle(0x5555u, 0xAAu);
+  write_cycle(0x2AAAu, 0x55u);
+  write_cycle(seca,    0x30u);
+  WAIT_TSE();  
+  exit_softid_mode();  
+}
+
+void sector_read(byte (&buff)[BUFFER_SIZE], dword addr)
+{
+  memset(buff, 0, BUFFER_SIZE);
+  for(dword a = 0; a < BUFFER_SIZE; ++a)
+    buff[a] = read_cycle(addr+a);
+}
+
+void program_byte(dword addr, byte data)
+{
+  write_cycle(0x5555u, 0xAAu);
+  write_cycle(0x2AAAu, 0x55u);
+  write_cycle(0x5555u, 0xA0u);  
+  write_cycle(addr, data);  
+  WAIT_BYP();
+}
+
+void sector_program(const byte (&buff)[BUFFER_SIZE], dword addr)
+{
+  for(dword a = 0; a < BUFFER_SIZE; ++a)
+    program_byte(addr+a, buff[a]);
+  exit_softid_mode();
 }
 
 enum cmd_state_type
@@ -170,12 +226,13 @@ enum cmd_state_type
 
 
 static byte           sec_buff[BUFFER_SIZE] = {0};
-static dword          cmd_buff[4u] = {0};
+static dword          cmd = {0};
 static cmd_state_type cmd_state = CMD_STATE_IDLE;
 
 void setup()
 {   
   programmer_init(); 
+  exit_softid_mode();
   memset(sec_buff, 0, sizeof(sec_buff));
   Serial.begin(115200);
 }
@@ -191,8 +248,8 @@ void loop()
       int b = Serial.read();
       if (b < 0)
         return;
-      cmd_buff[0] = (cmd_buff[0] >> 8u) | (dword(b) << 24);
-      if (cmd_buff[0] == SYNC_MAGIC)
+      cmd = (cmd >> 8u) | (dword(b) << 24);
+      if (cmd == SYNC_MAGIC)
         cmd_state = CMD_STATE_SYNCED;
       return;
     }    
@@ -200,10 +257,10 @@ void loop()
     {
       if (!Serial.available())
         return;        
-      cmd_buff[0] = 0u;
-      int len = Serial.readBytes((byte*)&cmd_buff[0], 
-        sizeof(cmd_buff[0]));
-      if (len != sizeof(cmd_buff[0])) {
+      cmd = 0u;
+      int len = Serial.readBytes((byte*)&cmd, 
+        sizeof(cmd));
+      if (len != sizeof(cmd)) {
         Serial.write("LOS!");
         cmd_state = CMD_STATE_IDLE;
         return;
@@ -211,26 +268,63 @@ void loop()
       
       // Decode command
       
-      switch(cmd_buff[0])
+      switch(cmd)
       {
       case CMD_SOFT_INFO:
         {
           word sfid = read_soft_id();
-          //Serial.write((char*)&sfid, 2);
-          Serial.write("SFID");
-          Serial.print(sfid, HEX);
+          Serial.write((char*)&CMD_SOFT_INFO, sizeof(CMD_SOFT_INFO));
+          Serial.write((char*)&sfid, sizeof(sfid));
+          Serial.write((char*)&sfid, sizeof(sfid));
           break;
         }
       case CMD_ERASE_CHIP:
         {
+          chip_erase();
+          Serial.write((char*)&CMD_ERASE_CHIP, sizeof(CMD_ERASE_CHIP));
           break;
         }
+      case CMD_ERASE_SECTOR:
+        {
+          Serial.readBytes((byte*)&cmd, sizeof(cmd));
+          sector_erase(cmd);
+          Serial.write((char*)&CMD_ERASE_SECTOR, sizeof(CMD_ERASE_SECTOR));
+          break;
+        }
+      case CMD_READ_BYTES:
+        {          
+          Serial.readBytes((byte*)&cmd, sizeof(cmd));
+          sector_read(sec_buff, cmd);
+          dword crcc = xcrc32(sec_buff, BUFFER_SIZE, 0u);
+          Serial.write((char*)&CMD_READ_BYTES, sizeof(CMD_READ_BYTES));
+          Serial.write((char*)&crcc, sizeof(crcc));
+          Serial.write((char*)sec_buff, BUFFER_SIZE);
+          break;
+        }
+      case CMD_WRITE_BYTES:
+        {
+          dword addr, crcc;
+          Serial.readBytes((byte*)&addr, sizeof(addr));
+          Serial.readBytes((byte*)&crcc, sizeof(crcc));
+          Serial.readBytes(sec_buff, BUFFER_SIZE);
+          if (crcc == xcrc32(sec_buff, BUFFER_SIZE, 0u))
+          {          
+            sector_program(sec_buff, addr);            
+            Serial.write((char*)&CMD_WRITE_BYTES, sizeof(CMD_WRITE_BYTES));
+          }
+          else
+          {
+            Serial.write("CRC!");
+          }
+          break;
+        }
+      
       default:
         Serial.print("IVC!");
         break;
       }
       cmd_state = CMD_STATE_IDLE;
-      break;
+      return;
     }    
   }
 }
