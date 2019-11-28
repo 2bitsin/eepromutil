@@ -5,7 +5,7 @@ I wrote this to help me flash SST39SF0*0A chips with help of arduino, as I could
 Maybe someone will find it useful. 
 
 ## Wiring
-
+```
   A0  - A7  : PORTA   : (Arduino pins 22, 23, 24, 25, 26, 27, 28, 29)
   A8  - A15 : PORTC   : (Arduino pins 37, 36, 35, 34, 33, 32, 31, 30)
   A16 - A18 : PORTG   : (Arduino pins 41, 40, 39)
@@ -13,6 +13,6 @@ Maybe someone will find it useful.
   CE#       : GND
   WE#       : PORTD.7 : (Arduino pin 38)
   OE#       : PORTB.0 : (Arduino pin 53)
-
+```
 
 
