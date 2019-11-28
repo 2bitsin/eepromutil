@@ -55,7 +55,7 @@
 
 #define WAIT_TCE() delay(100)
 #define WAIT_TSE() delay(25)
-#define WAIT_BYP() delayMicroseconds(40)
+#define WAIT_BYP() delayMicroseconds(20)
 
 //////////////////////////////////
 
@@ -119,30 +119,27 @@ void write_cycle(dword addr, byte data)
 {
   set_oe(0);
   set_we(0);
-
-  WAIT_SINGLE();
-  
+  WAIT_SINGLE(); 
   set_addr(addr);
   set_we(1);
-
-  WAIT_SINGLE();
-  
+  WAIT_SINGLE();  
   out_data(data);
-  set_we(0);
-  
+  set_we(0);  
   WAIT_SINGLE();
 }
 
-uint8_t read_cycle(dword addr)
+byte read_cycle(dword addr)
 {  
-  set_oe(0);
   set_we(0);
+  set_oe(0);
   WAIT_SINGLE();
   set_addr(addr);
   set_oe(1);
-  WAIT_SINGLE();
+  WAIT_SINGLE();  
+  byte r = inp_data();
   set_oe(0);
-  return inp_data();
+  WAIT_SINGLE();  
+  return r;  
 }
 
 void enter_softid_mode()
@@ -179,7 +176,6 @@ void chip_erase()
   write_cycle(0x2AAAu, 0x55u);
   write_cycle(0x5555u, 0x10u);
   WAIT_TCE();
-  exit_softid_mode();
 }
 
 void sector_erase(dword seca)
@@ -192,7 +188,6 @@ void sector_erase(dword seca)
   write_cycle(0x2AAAu, 0x55u);
   write_cycle(seca,    0x30u);
   WAIT_TSE();  
-  exit_softid_mode();  
 }
 
 void sector_read(byte (&buff)[BUFFER_SIZE], dword addr)
@@ -215,7 +210,6 @@ void sector_program(const byte (&buff)[BUFFER_SIZE], dword addr)
 {
   for(dword a = 0; a < BUFFER_SIZE; ++a)
     program_byte(addr+a, buff[a]);
-  exit_softid_mode();
 }
 
 enum cmd_state_type
@@ -233,6 +227,7 @@ void setup()
 {   
   programmer_init(); 
   exit_softid_mode();
+  inp_data();
   memset(sec_buff, 0, sizeof(sec_buff));
   Serial.begin(115200);
 }

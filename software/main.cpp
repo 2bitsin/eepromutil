@@ -105,7 +105,6 @@ struct controller
 			port.push(buff, true);
 
 			port.pull(resp);
-			printf ("%.*s", 4, (char*)&resp);
 			if (resp != CMD_WRITE_BYTES) 
 				throw std::runtime_error("Failed operation (bad response).");
 			std::printf("[crc: 0x%08X] ok\n", crcc);			
